@@ -6,15 +6,12 @@ This file contains a recomendation system built with Python
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import turicreate
 from collections import defaultdict
-from surprise import KNNBasic
-from surprise import Dataset
-from surprise import Reader
-from surprise import accuracy
-from surprise.model_selection import train_test_split
+from sklearn.model_selection import train_test_split
 
 # Specify global variables
-input_path = '../data/'
+input_path = '../data/ml-latest/'
 output_path = 'output/'
 raw_file_names = ['movies.csv', 'ratings.csv']
 user_based = False
@@ -23,12 +20,13 @@ class RecSys:
 	'''
 	Contains mid-level functions
 	'''
-	def __init__(self, input_path, output_path, raw_file_names, user_based, n_rec = 10, min_support = 3, diagnosis = True):
+	def __init__(self, input_path, output_path, raw_file_names, user_based, n_rec = 10, test_size = 0.08, pop_thres = 50, diagnosis = True):
 		# Configure object
 		self.diagnosis = diagnosis
 		self.user_based = user_based
 		self.n_rec = n_rec
-		self.min_support = min_support
+		self.test_size = test_size
+		self.pop_thres = pop_thres
 
 		# Accept inputs
 		self.input_path = input_path
@@ -40,17 +38,21 @@ class RecSys:
 		self.df_ratings = pd.DataFrame()
 		self.rating_matrix = pd.DataFrame()
 		self.rating_matrix_alt = pd.DataFrame()
+		self.train = pd.DataFrame()
 		self.test = pd.DataFrame()
-		self.algo = None
-		self.rec = {}
+		self.train_sf = None
+		self.test_sf = None
+		self.rec = None
 
 	def load_data(self):
+		print('Loading data into memory...')
 		df_movies = pd.read_csv(self.input_path + 'movies.csv')
 		df_ratings = pd.read_csv(self.input_path + 'ratings.csv')
 		self.df_movies = df_movies
 		self.df_ratings = df_ratings
 	
 	def clean_data(self):
+		print('Cleaning data for the recommendor system...')
 		# Check for duplicates
 		Aux.diagnosis(self.df_ratings, self.df_movies, self.diagnosis)
 
@@ -69,56 +71,52 @@ class RecSys:
 		# Drop redundant movies
 		self.df_movies = Aux.delete_redundants(self.df_movies, self.df_ratings)
 
+		# Drop unpopular movies and inactive users
+		vc2 = self.df_ratings.movieId.value_counts()
+		self.df_ratings = self.df_ratings[self.df_ratings.isin(vc2.index[vc2.values > self.pop_thres])['movieId']]
+		
+		vc = self.df_ratings.userId.value_counts()
+		self.df_ratings = self.df_ratings[self.df_ratings.isin(vc.index[vc.values > self.pop_thres])['userId']]
+
 		# Check for dimensionality after mutating data
+		print('Dimensionalities for rating data and movie data:')
 		print(self.df_movies.shape, self.df_ratings.shape)
 
-		# Spread rows into columns for matrix factorisation
-		#self.rating_matrix = self.df_ratings.pivot(index = 'userId', columns = 'movieId', values = 'rating')
-
 		# Glimpse the cleaned data
-		#print(self.df_ratings.head())
-		#print(self.df_movies.head())
-		#print(self.rating_matrix.head())
-
-		# (Alternatively) Spread the data using the library
-		reader = Reader(rating_scale = (1,5))
-		self.rating_matrix_alt = Dataset.load_from_df(self.df_ratings, reader)
+		print('Rating Data:')
+		print(self.df_ratings.head())
+		print('Movie Data')
+		print(self.df_movies.head())
 
 	def model(self):
-		# Split the whole dataset into train and test data
-		train, self.test = train_test_split(self.rating_matrix_alt, test_size = 0.1)
+		# Partition the data into train and test datasets
+		# Convert the partitioned datasets into sparse dataframes
+		print('Starting modelling procedure...')
+		self.train, self.test, self.train_sf, self.test_sf = Aux.data_partition(self.df_ratings, test_size = self.test_size)
 
-		# Configure the algorithm of choice
-		self.algo = KNNBasic(sim_options = {'name':'MSD',
-						'user_based':self.user_based,
-						'min_support':self.min_support})
+		# Configure the model of choice
+		model = turicreate.item_similarity_recommender.create(self.train_sf, user_id = 'userId', item_id = 'movieId', target = 'rating', similarity_type = 'cosine')
 
-		# Fit the model on train data
-		self.algo.fit(train)
+		# make predictions on test dataset
+		self.rec = model.recommend(users = self.test['userId'].unique().tolist(), k = self.n_rec)
 
-		# make predictions
-		predictions = self.algo.test(self.test)
-		print(accuracy.rmse(predictions))
-
-	def rec_n(self):
-		# Make predictions on items to recommend
-		predictions = self.algo.test(self.test)
-
-		# Only produce the top n_rec number of recommendations for each user
-		top_n = Aux.get_top_n(predictions, n_rec = self.n_rec)
-
-		# Print the recommended items for each user and ready them for output
-		self.rec = Aux.process_rec(self.rec, top_n, self.n_rec)
+		# Print out recommendations for 3 randomly selected users
+		df = self.rec.to_dataframe()
+		print('Sample recommendations for 3 randomly selected users') 
+		print(df.loc[df['userId'].isin(np.random.choice(df['userId'].unique(), size = 3)),:])
+		
+	def model_alt(self):
+		print('This function is still under construction')
 
 	def output_data(self):
 		# Save the dataframe into a csv file
-		self.rec.to_csv(self.output_path + 'top_' + str(self.n_rec) + '_rec.csv', index = True)
+		print('Saving all recommendations to memory')
+		self.rec.save(output_path + 'top_' + str(self.n_rec) + '_rec.csv', format = 'csv')
 
 	def exec(self):
 		self.load_data()
 		self.clean_data()
 		self.model()
-		self.rec_n()
 		self.output_data()
 
 class Aux:
@@ -142,8 +140,6 @@ class Aux:
 	def delete_duplicates(df_ratings, df_movies):
 		# Drop the same movie with different movie ids and their ratings
 		duplicated_movie_id = df_movies.loc[df_movies.duplicated(subset = 'title', keep = 'first'), :]['movieId']
-		print('Here are the dropped duplicated rows:')
-		print(duplicated_movie_id)
 		df_movies = df_movies.loc[~df_movies['movieId'].isin(duplicated_movie_id), :]
 		df_ratings = df_ratings.loc[~df_ratings['movieId'].isin(duplicated_movie_id), :]
 		return df_ratings, df_movies
@@ -161,7 +157,16 @@ class Aux:
 		df_movies = df_movies.loc[df_movies['movieId'].isin(df_ratings['movieId']),:]
 		return df_movies
 
+	def data_partition(df_ratings, test_size):
+		# Split the whole dataset into train and test data
+		train, test = train_test_split(df_ratings, test_size = test_size)
+		train_sf, test_sf = turicreate.SFrame(train), turicreate.SFrame(test)
+		print('The number of unique users in training set is ' + str(len(train['userId'].unique())))
+		print('The number of unique movies in training set is ' + str(len(train['movieId'].unique())))
+		return train, test, train_sf, test_sf
+
 	def get_top_n(predictions, n_rec):
+		'''Deprecated'''
 		# Map predictions to users
 		top_n = defaultdict(list)
 		for uid, iid, true_r, est, _ in predictions:
@@ -174,6 +179,7 @@ class Aux:
 		return top_n
 	
 	def process_rec(rec, top_n, n_rec):
+		'''Deprecated'''
 		# Print 10 random predictions associated with users
 		for uid, user_ratings in top_n.items():
 			rec[uid] = [iid for (iid, _) in user_ratings]
