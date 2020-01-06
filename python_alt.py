@@ -105,9 +105,6 @@ class RecSys:
 		print('Sample recommendations for 3 randomly selected users') 
 		print(df.loc[df['userId'].isin(np.random.choice(df['userId'].unique(), size = 3)),:])
 		
-	def model_alt(self):
-		print('This function is still under construction')
-
 	def output_data(self):
 		# Save the dataframe into a csv file
 		print('Saving all recommendations to memory')
